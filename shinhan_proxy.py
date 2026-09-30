@@ -1670,6 +1670,8 @@ def _get_hist_price_naver(code, date_str):
     except Exception as e:
         print(f"[DART] 종가 조회 오류 {code} {date_str}: {e}")
     return None
+
+def _get_dart_corp_codes():
     """신한알파리츠·서부리츠 DART 고유번호 (확인된 값 하드코딩)"""
     global _dart_corp_codes
     if not _dart_corp_codes:
