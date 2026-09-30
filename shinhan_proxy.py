@@ -236,7 +236,11 @@ body{background:#0a0e1a;color:#eceff6;font-family:'Malgun Gothic','Apple SD Goth
       </a>
       <a href="/export-report" id="btn-export"
         style="background:rgba(52,255,130,.1);border:1px solid rgba(52,255,130,.35);border-radius:6px;color:#4ade80;font-size:11px;padding:3px 10px;text-decoration:none;font-weight:600">
-        📥 보고서 생성
+        📥 일일 보고서
+      </a>
+      <a href="/investor-report"
+        style="background:rgba(100,160,255,.1);border:1px solid rgba(100,160,255,.35);border-radius:6px;color:#64a0ff;font-size:11px;padding:3px 10px;text-decoration:none;font-weight:600">
+        📋 투자자 보고서
       </a>
     </div>
   </div>
@@ -253,6 +257,12 @@ body{background:#0a0e1a;color:#eceff6;font-family:'Malgun Gothic','Apple SD Goth
 </div>
 
 <div id="macro-banner"></div>
+<div style="background:#0f1826;border:1px solid #1e2d45;border-radius:10px;padding:10px 16px;margin:8px 20px 0;font-size:11px;color:#5d6680;line-height:1.7">
+  ⚠️ <b style="color:#8993ad">이용 안내</b> &nbsp;—&nbsp;
+  본 페이지는 Koscom API·네이버 증권·DART 공시 데이터를 기반으로 <b>AI가 자동 생성</b>한 참고 자료입니다.
+  데이터 지연·오류·누락이 발생할 수 있으며, AI 분석 브리핑은 실제와 다를 수 있습니다.
+  <b>투자 권유·자문이 아니며</b>, 정확한 정보는 공식 공시 자료 및 담당자 확인을 권장합니다.
+</div>
 
 <!-- AI 브리핑 -->
 <div class="briefing" id="briefing-wrap">
@@ -1619,6 +1629,110 @@ def _s(v):
     """CSS inline style helper: dict → style string"""
     return ";".join(f"{k}:{v2}" for k,v2 in v.items())
 
+
+# ══════════════════════════════════════════════════════════════════
+#  DART API — 배당 정보 조회
+# ══════════════════════════════════════════════════════════════════
+DART_API_KEY = "777aff14b08a827d6029db99bcfe13846127b0b9"
+_dart_corp_codes = {}  # 캐시
+
+def _get_hist_price_naver(code, date_str):
+    """Naver Finance 일별시세에서 특정 날짜 종가 조회"""
+    import re as _re
+    target = date_str.replace("-",".")  # "2024.09.30"
+    try:
+        for page in range(1, 60):
+            r = requests.get(
+                f"https://finance.naver.com/item/sise_day.naver?code={code}&page={page}",
+                headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                         "Referer":"https://finance.naver.com/",
+                         "Accept-Language":"ko-KR,ko;q=0.9"},
+                timeout=8
+            )
+            r.encoding = "euc-kr"
+            html = r.text
+            if target not in html:
+                # 이 페이지의 가장 오래된 날짜 확인
+                dates = _re.findall(r'(\d{4}\.\d{2}\.\d{2})', html)
+                if dates and min(dates) < target:
+                    break  # 이미 지나침
+                continue
+            # 날짜 행에서 종가(두 번째 숫자) 추출
+            # 행 구조: 날짜 | 종가 | 전일비 | 시가 | 고가 | 저가 | 거래량
+            m = _re.search(
+                target.replace(".",r"\.") + r'</td>.*?<td[^>]*>\s*<span[^>]*>([\d,]+)</span>',
+                html, _re.DOTALL
+            )
+            if m:
+                price = int(m.group(1).replace(",",""))
+                print(f"[DART] {code} {date_str} 종가: {price:,}원")
+                return price
+    except Exception as e:
+        print(f"[DART] 종가 조회 오류 {code} {date_str}: {e}")
+    return None
+    """신한알파리츠·서부리츠 DART 고유번호 (확인된 값 하드코딩)"""
+    global _dart_corp_codes
+    if not _dart_corp_codes:
+        _dart_corp_codes = {
+            "293940": {"corp_code": "01276594", "corp_name": "신한알파리츠"},
+            "404990": {"corp_code": "01436558", "corp_name": "신한서부티엔디리츠"},
+        }
+    return _dart_corp_codes
+
+def _get_dart_dividend(stock_code):
+    """최근 배당 정보 조회 — 주당배당금·배당수익률 중심"""
+    codes = _get_dart_corp_codes()
+    if stock_code not in codes: return []
+    corp_code = codes[stock_code]["corp_code"]
+
+    # 표시할 항목
+    SHOW_SE = {"주당 현금배당금(원)", "현금배당수익률(%)", "현금배당금총액(백만원)"}
+
+    results = []
+    seen = set()
+    for year in ["2026","2025","2024","2023"]:
+        for reprt_code in ["11011","11012"]:
+            try:
+                r = requests.get(
+                    "https://opendart.fss.or.kr/api/alotMatter.json",
+                    params={"crtfc_key": DART_API_KEY, "corp_code": corp_code,
+                            "bsns_year": year, "reprt_code": reprt_code},
+                    timeout=10
+                )
+                if not r.ok: continue
+                d = r.json()
+                if d.get("status") != "000": continue
+                for item in d.get("list", []):
+                    se  = item.get("se","")
+                    knd = item.get("stock_knd","")
+                    val = item.get("thstrm","")
+                    dt  = item.get("stlm_dt","")
+                    if se not in SHOW_SE: continue
+                    if val in ("-","",None): continue
+                    # 보통주만 (종류주 제외)
+                    if knd and knd not in ("보통주","-"): continue
+                    key = (se, dt)
+                    if key in seen: continue
+                    seen.add(key)
+                    # 주당배당금이면 결산일 종가로 수익률 직접 계산
+                    calc_yield = None
+                    if "주당 현금배당금" in se and knd in ("보통주","-") and val not in ("-",""):
+                        try:
+                            close_px = _get_hist_price_naver(stock_code, dt)
+                            if close_px and close_px > 0:
+                                dps = float(val.replace(",",""))
+                                calc_yield = round(dps / close_px * 2 * 100, 2)
+                        except: pass
+                    results.append({"se": se, "knd": knd, "val": val, "dt": dt,
+                                    "year": year, "reprt_code": reprt_code,
+                                    "calc_yield": calc_yield})
+                if results: break
+            except Exception as e:
+                print(f"DART 배당 오류 {year}: {e}")
+        if results: break
+    return results
+
+
 def _make_report_briefing(sd, fd, now):
     """보고서용 AI 브리핑 HTML 생성 (Python 버전)"""
     FOREIGN_KEYS = ["모간","골드만","씨티","UBS","메릴","도이치","CLSA","노무라","맥쿼리","BNP","바클레이"]
@@ -2128,6 +2242,341 @@ body{{background:#0a0e1a;color:#eceff6;font-family:'Malgun Gothic','Apple SD Got
 </script>
 </body>
 </html>"""
+
+
+
+def _build_investor_report_html(sd, fd, div_data, now):
+    """외부 투자자용 보고서 HTML"""
+    import datetime as _dt
+    wd  = ["월","화","수","목","금","토","일"][now.weekday()]
+    dts = now.strftime("%Y. %m. %d.") + f" ({wd})"
+
+    def nf(s): return float(str(s or "0").replace(",","")) if s else 0.0
+    def nc(v):
+        v=float(v) if v else 0
+        if v>=1e12: return f"{v/1e12:.1f}조"
+        if v>=1e8:  return f"{round(v/1e8):,}억"
+        return f"{round(v):,}"
+
+    STOCKS = [("293940","신한알파리츠","오피스"), ("404990","신한서부티엔디리츠","리테일·호텔")]
+
+    cards = ""
+    for code, name, stype in STOCKS:
+        r   = sd.get(code,{}).get("results",{})
+        st  = r.get("STOCK",{}); hist = r.get("HIST",[])
+        intra = r.get("INTRA",[])
+
+        price  = nf(st.get("F15001")); prev  = nf(st.get("F15007"))
+        chg    = nf(st.get("F15472")); chgR  = float(st.get("F15004",0))
+        dirv   = st.get("F15006","3")
+        hi52   = nf(st.get("F02133")); lo52  = nf(st.get("F02155"))
+        vol    = nf(st.get("F15015")); amt   = nf(st.get("F15023"))
+        mktcap = nf(st.get("F15028"))
+        p52    = round(max(0,min(100,(price-lo52)/(hi52-lo52 or 1)*100)),1)
+
+        up  = dirv=="2"; dn = dirv=="5"
+        clr = "#e05252" if up else "#4a7fd4" if dn else "#888"
+        sign= "+" if up else ""
+        arr = "▲" if up else "▼" if dn else "–"
+
+        # 30일 차트 데이터
+        hchr = list(reversed(hist[-30:])) if hist else []
+        hl = [h.get("F12507","").replace("26/","") for h in hchr]
+        hc = [nf(h.get("F15001")) for h in hchr]
+        hd = [h.get("F15006","3") for h in hchr]
+        import json as _j
+        hl_js = _j.dumps(hl); hc_js = _j.dumps(hc); hd_js = _j.dumps(hd)
+
+        # frgn
+        frgnrows = (fd.get(code,{}) or {}).get("rows",[])[:10]
+        frgn_html = ""
+        if frgnrows:
+            frgn_html = '<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:8px"><thead><tr style="border-bottom:1px solid #ddd">'
+            for h in ["날짜","종가","등락","거래량","기관","외국인","보유율"]:
+                frgn_html += f'<th style="text-align:left;padding:4px 6px 4px 0;color:#888;font-weight:500">{h}</th>'
+            frgn_html += "</tr></thead><tbody>"
+            for row in frgnrows:
+                rate=row.get("chg_rate","")
+                rclr="#e05252" if not rate.startswith("-") else "#4a7fd4"
+                inst_n=row.get("inst_net",0); frgn_n=row.get("frgn_net",0)
+                iclr="#e05252" if inst_n>=0 else "#4a7fd4"
+                fclr="#e05252" if frgn_n>=0 else "#4a7fd4"
+                frgn_html += (f'<tr style="border-bottom:1px solid #f0f0f0">'
+                    f'<td style="padding:4px 6px 4px 0;color:#666">{row.get("date","")[5:]}</td>'
+                    f'<td style="padding:4px 6px 4px 0;font-family:monospace">{row.get("close",0):,}</td>'
+                    f'<td style="padding:4px 6px 4px 0;color:{rclr};font-family:monospace">{rate}</td>'
+                    f'<td style="padding:4px 6px 4px 0;font-family:monospace">{round(row.get("volume",0)/1e4) if row.get("volume") else 0}만주</td>'
+                    f'<td style="padding:4px 6px 4px 0;font-weight:600;color:{iclr};font-family:monospace">{inst_n:+,}</td>'
+                    f'<td style="padding:4px 6px 4px 0;font-weight:600;color:{fclr};font-family:monospace">{frgn_n:+,}</td>'
+                    f'<td style="padding:4px 0;color:#888;font-family:monospace">{row.get("frgn_ratio","")}</td></tr>')
+            frgn_html += "</tbody></table>"
+
+        # 배당 정보
+        div = div_data.get(code,[])
+        div_html = ""
+        if div:
+            div_html = '<div style="margin-top:16px"><div style="font-size:11px;font-weight:700;color:#444;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">배당 정보 (DART 공시 기준)</div>'
+            dps_rows   = [d for d in div if "주당 현금배당금" in d.get("se","") and d.get("knd") in ("보통주","-")]
+            yield_rows = [d for d in div if "현금배당수익률" in d.get("se","") and d.get("knd") in ("보통주","-")]
+
+            # 주당 현금배당금
+            if dps_rows:
+                div_html += '<div style="font-size:11px;font-weight:600;color:#666;margin:8px 0 4px">주당 현금배당금 (보통주, 원)</div>'
+                for d in dps_rows[:3]:
+                    div_html += (f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-top:1px solid #f0f0f0;font-size:12px">'
+                        f'<span style="color:#888">{d.get("dt","")}</span>'
+                        f'<span style="font-weight:700;color:#1a1a1a">{d.get("val","")}원</span></div>')
+
+            # 현금배당수익률 (연환산 = DPS/결산일종가×2)
+            if yield_rows:
+                div_html += '<div style="font-size:11px;font-weight:600;color:#666;margin:8px 0 4px">현금배당수익률 (연환산, 결산일 종가 기준)</div>'
+                for d in dps_rows[:3]:  # DPS 행에서 calc_yield 사용
+                    cy = d.get("calc_yield")
+                    if cy is None: continue
+                    div_html += (f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-top:1px solid #f0f0f0;font-size:12px">'
+                        f'<span style="color:#888">{d.get("dt","")}</span>'
+                        f'<span style="font-weight:700;color:#3457cc">{cy:.2f}%</span></div>')
+                div_html += '<div style="font-size:10px;color:#aaa;margin-top:4px">※ 해당 결산기말 종가 기준으로 산출된 배당수익률이며, 연환산 기준입니다. (DPS ÷ 결산일 종가 × 2)</div>'
+
+            div_html += "</div>"
+        else:
+            div_html = '<div style="margin-top:16px;font-size:11px;color:#aaa">배당 공시 데이터 없음</div>'
+
+        # ETF 보유 현황 (하드코딩, 2026-06-30 기준)
+        ETF_HOLD = {
+            "293940": [("TIGER",5.81),("KODEX",6.52),("ACE",5.58),("WON",2.86),("PLUS",10.99)],
+            "404990": [("TIGER",2.19),("KODEX",1.44),("ACE",3.50),("WON",3.03),("PLUS",2.57)],
+        }
+        etf_bars = ""
+        for etf_name, w in ETF_HOLD.get(code,[]):
+            bar_w = round(min(100, w*5))
+            etf_bars += (f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px">'
+                f'<span style="width:50px;color:#666;font-size:11px">{etf_name}</span>'
+                f'<div style="flex:1;height:8px;background:#f0f0f0;border-radius:4px">'
+                f'<div style="height:100%;width:{bar_w}%;background:#3457cc;border-radius:4px"></div></div>'
+                f'<span style="width:40px;text-align:right;font-weight:600;color:#3457cc">{w:.2f}%</span></div>')
+
+        cards += f"""
+<div style="background:#fff;border:1px solid #e8e8e8;border-radius:12px;overflow:hidden;margin-bottom:24px">
+  <div style="height:4px;background:{clr}"></div>
+  <div style="padding:22px 24px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
+      <div>
+        <div style="font-size:18px;font-weight:700;color:#1a1a1a">{name}</div>
+        <div style="font-size:12px;color:#888;margin-top:2px">KOSPI {code} · {stype}</div>
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:16px">
+      <span style="font-size:36px;font-weight:700;font-family:monospace;color:#1a1a1a">{round(price):,}</span>
+      <span style="font-size:13px;font-weight:700;padding:3px 10px;border-radius:6px;
+        background:{"rgba(224,82,82,.08)" if up else "rgba(74,127,212,.08)"};color:{clr};font-family:monospace">
+        {arr} {round(abs(chg)):,} ({sign}{chgR:.2f}%)</span>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px">
+      {''.join(f'<div style="background:#f8f9fa;border-radius:8px;padding:10px"><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px">{l}</div><div style="font-size:13px;font-weight:600;font-family:monospace">{v}</div></div>' for l,v in [("시가총액",nc(mktcap)),("52주 고가",f"{round(hi52):,}"),("52주 저가",f"{round(lo52):,}"),("52주위치",f"{p52:.0f}%")])}
+    </div>
+
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;font-weight:700;color:#444;margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">30일 주가 추이</div>
+      <div style="height:120px;background:#f8f9fa;border-radius:8px;padding:8px">
+        <canvas id="ch-{code}" style="width:100%;height:100%"></canvas>
+      </div>
+    </div>
+
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;font-weight:700;color:#444;margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">외국인·기관 순매매 (최근 10일)</div>
+      {frgn_html if frgn_html else '<div style="font-size:11px;color:#aaa">데이터 없음</div>'}
+    </div>
+
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;font-weight:700;color:#444;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">리츠 ETF 편입 비중 (2026-06-30)</div>
+      {etf_bars}
+    </div>
+
+    {div_html}
+  </div>
+</div>
+
+<script>
+(function(){{
+  var c=document.getElementById('ch-{code}');
+  if(c&&window.Chart){{
+    var hl={hl_js},hc={hc_js},hd={hd_js};
+    new Chart(c,{{type:'line',data:{{labels:hl,datasets:[{{data:hc,
+      borderColor:'#3457cc',borderWidth:2,tension:0.3,pointRadius:0,
+      fill:true,backgroundColor:'rgba(52,87,204,0.06)'}}]}},
+      options:{{responsive:true,maintainAspectRatio:false,
+        plugins:{{legend:{{display:false}}}},
+        scales:{{x:{{ticks:{{color:'#999',font:{{size:9}}}},grid:{{color:'rgba(0,0,0,.04)'}}}},
+          y:{{ticks:{{color:'#999',font:{{size:9}}}},grid:{{color:'rgba(0,0,0,.04)'}}}}}}}}
+    }});
+  }}
+}})();
+</script>
+"""
+
+    # 매크로 환경
+    MACRO_PY = [
+        ("2026-07-16","금통위","한국은행 기준금리 25bp 인상"),
+        ("2026-07-29","FOMC","FOMC 금리 결정"),
+        ("2026-08-12","CPI","미국 CPI 발표"),
+        ("2026-08-28","금통위","한국은행 금통위"),
+    ]
+    today = now.date()
+    macro_items = ""
+    for d, t, n in MACRO_PY:
+        diff = (_dt.date.fromisoformat(d)-today).days
+        if -7 <= diff <= 30:
+            label = "완료" if diff<0 else f"D-{diff}"
+            clr2 = "#e05252" if diff<0 else "#3457cc"
+            macro_items += (f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                f'padding:7px 0;border-top:1px solid #f0f0f0;font-size:12px">'
+                f'<span><b style="color:#444">{t}</b> <span style="color:#666">{n}</span></span>'
+                f'<span style="font-weight:700;color:{clr2}">{label}</span></div>')
+
+    macro_html = f"""
+<div style="background:#fff;border:1px solid #e8e8e8;border-radius:12px;padding:22px 24px;margin-bottom:24px">
+  <div style="font-size:14px;font-weight:700;color:#1a1a1a;margin-bottom:12px">매크로 환경</div>
+  <div style="font-size:12px;color:#555;line-height:1.7;margin-bottom:12px;padding:12px;background:#f8f9fa;border-radius:8px">
+    한국은행은 2026년 7월 16일 기준금리를 25bp 인상하였습니다. 금리 인상은 리츠 섹터의 자본비용 증가 및 요구수익률 상향 요인으로 작용할 수 있으나, 우량 자산 기반 배당 안정성은 유지될 것으로 판단됩니다.
+  </div>
+  {macro_items}
+</div>""" if macro_items else ""
+
+    return f"""<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>신한리츠 투자자 보고서 {now.strftime('%Y.%m.%d')}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#f5f6f8;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;font-size:14px;color:#1a1a1a}}
+</style></head><body>
+<div style="max-width:900px;margin:0 auto;padding:32px 20px">
+
+  <div style="border-bottom:2px solid #1a1a1a;padding-bottom:16px;margin-bottom:24px">
+    <div style="font-size:11px;color:#888;letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px">Shinhan REIT Management</div>
+    <h1 style="font-size:24px;font-weight:700">상장리츠 투자 현황 보고서</h1>
+    <div style="font-size:13px;color:#666;margin-top:4px">신한알파리츠 (293940) · 신한서부티엔디리츠 (404990) · {dts}</div>
+  </div>
+
+  {cards}
+  {macro_html}
+
+  <div style="font-size:10px;color:#aaa;border-top:1px solid #e8e8e8;padding-top:14px;line-height:1.8">
+    본 보고서는 투자 권유를 목적으로 하지 않으며, 투자 판단의 최종 책임은 투자자 본인에게 있습니다.
+    수록된 정보는 Koscom API, 네이버 증권, DART 전자공시 기반으로 자동 생성되었으며 실제 값과 차이가 있을 수 있습니다.
+    생성: {now.strftime('%Y-%m-%d %H:%M KST')}
+  </div>
+</div>
+</body></html>"""
+
+
+
+
+@app.route("/send-report", methods=["POST"])
+def send_report_now():
+    """수동 이메일 발송 버튼"""
+    threading.Thread(target=_auto_send_reports, daemon=True).start()
+    return Response('{"status":"sending","msg":"발송 중... 약 20초 후 이메일 확인"}',
+                    mimetype="application/json")
+
+@app.route("/dart-test")
+def dart_test():
+    """DART API 연결 및 배당 데이터 테스트"""
+    import zipfile, io, re as _re
+    results = {"step": [], "corp_codes": {}, "dividend": {}}
+
+    # 1. XML 다운로드 시도
+    try:
+        results["step"].append("XML 다운로드 시작")
+        r = requests.get(
+            "https://opendart.fss.or.kr/api/corpCode.xml",
+            params={"crtfc_key": DART_API_KEY},
+            timeout=60
+        )
+        results["step"].append(f"응답: {r.status_code} / {len(r.content)}bytes")
+
+        if r.ok and len(r.content) > 1000:
+            z = zipfile.ZipFile(io.BytesIO(r.content))
+            xml = z.read(z.namelist()[0]).decode("utf-8")
+            results["step"].append(f"XML 파싱: {len(xml)}자")
+            results["xml_sample"] = xml[:300]
+
+            # 293940, 404990 검색
+            for sc in ["293940","404990"]:
+                idx = xml.find(sc)
+                if idx >= 0:
+                    results["step"].append(f"{sc} 발견 at {idx}")
+                    results[f"around_{sc}"] = xml[max(0,idx-150):idx+150]
+                else:
+                    results["step"].append(f"{sc} 없음")
+        else:
+            results["error"] = r.text[:200]
+    except Exception as e:
+        results["step"].append(f"오류: {str(e)}")
+
+    # 2. corp_codes 재조회
+    _dart_corp_codes.clear()
+    codes = _get_dart_corp_codes()
+    results["corp_codes"] = codes
+
+    # 3. 배당 조회
+    if codes:
+        for sc, info in codes.items():
+            try:
+                r2 = requests.get(
+                    "https://opendart.fss.or.kr/api/alotMatter.json",
+                    params={"crtfc_key": DART_API_KEY,
+                            "corp_code": info["corp_code"],
+                            "bsns_year": "2024", "reprt_code": "11011"},
+                    timeout=10
+                )
+                d = r2.json() if r2.ok else {"error": r2.status_code}
+                results["dividend"][sc] = d
+            except Exception as e:
+                results["dividend"][sc] = {"error": str(e)}
+
+    return Response(json.dumps(results, ensure_ascii=False, indent=2),
+                    mimetype="application/json; charset=utf-8")
+
+@app.route("/investor-report")
+def investor_report():
+    """외부 투자자용 HTML 보고서 생성"""
+    import traceback
+    now = datetime.now(KST)
+    try:
+        sd = {}
+        for code in ["293940","404990"]:
+            try:
+                r = requests.get(f"{KOSCOM_BASE}/getStockInfo",
+                    params={"code":code,"auth_key":AUTH,"gubun":"K"}, timeout=10)
+                if r.ok: sd[code] = r.json()
+            except: pass
+
+        fd = {}
+        for code in ["293940","404990"]:
+            fd[code] = scrape_naver_frgn(code)
+
+        div_data = {}
+        for code in ["293940","404990"]:
+            div_data[code] = _get_dart_dividend(code)
+
+        html = _build_investor_report_html(sd, fd, div_data, now)
+        from urllib.parse import quote
+        resp = Response(html, mimetype="text/html; charset=utf-8")
+        resp.headers["Content-Disposition"] = (
+            f'attachment; filename="shinhan_reit_investor.html"; '
+            f'filename*=UTF-8\'\'{quote("신한리츠_투자자보고서.html")}'
+        )
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except Exception as e:
+        err = traceback.format_exc()
+        print(err)
+        return Response(f"<pre>오류:\n{err}</pre>", status=500, mimetype="text/html; charset=utf-8")
 
 
 @app.route("/export-report")
@@ -2642,6 +3091,12 @@ a{text-decoration:none;color:inherit}
     </div>
   </div>
 </div>
+<div style="background:#0f1826;border:1px solid #1e2d45;border-radius:10px;padding:10px 16px;margin:8px 20px 0;font-size:11px;color:#5d6680;line-height:1.7">
+  ⚠️ <b style="color:#8993ad">이용 안내</b> &nbsp;—&nbsp;
+  ETF 편입 현황은 <b>수동 입력 데이터(2026-06-30 기준)</b>이며 실시간이 아닙니다.
+  임계치 모니터·D-day·예상 매매 영향은 AI가 규칙 기반으로 자동 산출한 <b>참고용 추정치</b>로, 실제 ETF 정기변경 결과와 다를 수 있습니다.
+  <b>투자 판단의 근거로 사용하지 마십시오.</b>
+</div>
 <div id="alert-banner"></div>
 <div class="section"><div class="sec-title">🚨 편입·편출 임계치 현황 <span style="font-size:10px;font-weight:400;color:#5d6680">— 실시간 시가총액·거래대금</span></div>
   <div class="tgrid" id="thresh-grid"><div class="loading">API 데이터 로딩 중…</div></div></div>
@@ -3075,6 +3530,76 @@ def proxy(endpoint):
     except Exception as e:
         return Response(json.dumps({"error":str(e)}),status=500,mimetype="application/json")
 
+
+# ══════════════════════════════════════════════════════════════════
+#  이메일 자동 발송
+# ══════════════════════════════════════════════════════════════════
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+
+def _send_report_email(html_content, subject, recipients, cc=[]):
+    """Gmail SMTP로 HTML 보고서 이메일 발송"""
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = GMAIL_USER
+        msg["To"]      = ", ".join(recipients)
+        if cc: msg["Cc"] = ", ".join(cc)
+
+        msg.attach(MIMEText(html_content, "html", "utf-8"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(GMAIL_USER, GMAIL_PASS)
+            smtp.sendmail(GMAIL_USER, recipients + cc, msg.as_string())
+
+        print(f"✅ 이메일 발송 완료 → {recipients}")
+        return True
+    except Exception as e:
+        print(f"❌ 이메일 발송 오류: {e}")
+        return False
+
+def _auto_send_reports():
+    """장마감 후 보고서 자동 생성 및 발송"""
+    now = datetime.now(KST)
+    print(f"\n📧 보고서 자동 발송 시작 ({now.strftime('%H:%M KST')})")
+
+    # 데이터 수집
+    sd = {}
+    for code in ["293940","404990"]:
+        try:
+            r = requests.get(f"{KOSCOM_BASE}/getStockInfo",
+                params={"code":code,"auth_key":AUTH,"gubun":"K"}, timeout=10)
+            if r.ok: sd[code] = r.json()
+        except: pass
+
+    fd = {}
+    for code in ["293940","404990"]:
+        fd[code] = scrape_naver_frgn(code)
+
+    # 일일 보고서 발송
+    html = _build_report_html(sd, fd, now)
+    subject = f"[신한리츠] 일일 거래 모니터링 보고서 {now.strftime('%Y.%m.%d')}"
+    _send_report_email(html, subject, REPORT_TO, REPORT_CC)
+
+def _start_scheduler():
+    """매일 지정 시각에 보고서 자동 발송"""
+    import time as _time
+    print(f"📅 자동 발송 스케줄러 시작 (매일 {REPORT_HOUR:02d}:{REPORT_MIN:02d} KST)")
+    sent_today = None
+    while True:
+        now = datetime.now(KST)
+        today = now.date()
+        # 평일만 (월=0 ~ 금=4)
+        if now.weekday() < 5 and now.hour == REPORT_HOUR and now.minute == REPORT_MIN:
+            if sent_today != today:
+                sent_today = today
+                threading.Thread(target=_auto_send_reports, daemon=True).start()
+        _time.sleep(30)
+
+
 if __name__=="__main__":
     print()
     print("  ┌─────────────────────────────────────────────────────┐")
@@ -3084,6 +3609,8 @@ if __name__=="__main__":
     print("  └─────────────────────────────────────────────────────┘")
     print()
     try:
+        # 자동 발송 스케줄러 백그라운드 실행
+        threading.Thread(target=_start_scheduler, daemon=True).start()
         app.run(host="0.0.0.0",port=PORT,debug=False)
     except OSError as e:
         print(f"\n[오류] 포트 {PORT} 사용 중: {e}"); sys.exit(1)
