@@ -579,24 +579,6 @@ function renderCard(meta,raw,kospi){
       </div>
     </div>
 
-    <!-- 외국인·기관 순매매 표 -->
-    <div class="frgn-section">
-      <div class="frgn-header">
-        <span class="frgn-ttl">외국인·기관 순매매 거래량 (최근 20일)</span>
-        <span class="frgn-src" id="frgn-src-${meta.code}">로딩 중…</span>
-      </div>
-      <div id="frgn-${meta.code}"><div class="frgn-load">네이버 증권에서 데이터 불러오는 중…</div></div>
-    </div>
-
-    <!-- 기관·외국인 순매매 바차트 -->
-    <div id="frgn-chart-${meta.code}"></div>
-
-    <!-- 수급주체 -->
-    <div class="frgn-section" style="margin-top:0">
-      <div id="inv-${meta.code}">
-        <div class="frgn-load">수급주체(외국인·기관·개인) 조회 중…</div>
-      </div>
-    </div>
 
     <!-- 거래원 -->
     <div>
